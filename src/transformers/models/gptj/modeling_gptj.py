@@ -183,7 +183,7 @@ class GPTJAttention(nn.Module):
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
         attn_weights = attn_weights.to(value.dtype)
-        attn_weights = self.attn_dropout(attn_weights)
+        attn_weights = self.attn_dropout(attn_weights) 
 
         # Mask heads if we want to
         if head_mask is not None:
