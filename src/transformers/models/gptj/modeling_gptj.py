@@ -170,7 +170,16 @@ class GPTJAttention(nn.Module):
 
         if attention_mask is not None:
             # Apply the attention mask
-            attn_weights = attn_weights + attention_mask
+            dtype = attention_mask.dtype
+            device = attention_mask.device 
+            if attention_mask.max()==0:
+                attn_weights = attn_weights + attention_mask
+            else:
+                init_attention_mask = (attention_mask==0).to(dtype)*torch.finfo(dtype).min
+                attn_weights = attn_weights + init_attention_mask 
+                attn_scale = attention_mask.max()
+                scale_attention_mask = (attention_mask>1).to(dtype)*attn_scale + (attention_mask<=1).to(dtype)
+                attn_weights = attn_weights * scale_attention_mask 
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
         attn_weights = attn_weights.to(value.dtype)
@@ -622,7 +631,8 @@ class GPTJModel(GPTJPreTrainedModel):
             # Since we are adding it to the raw scores before the softmax, this is
             # effectively the same as removing these entirely.
             attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
-            attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
+            if attention_mask.max() == 1:
+                attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
