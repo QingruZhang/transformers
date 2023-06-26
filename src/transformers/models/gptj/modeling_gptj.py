@@ -170,7 +170,7 @@ class GPTJAttention(nn.Module):
 
         if attention_mask is not None:
             # Apply the attention mask
-            dtype = attention_mask.dtype
+            dtype = attn_weights.dtype
             device = attention_mask.device 
             if attention_mask.max()==0:
                 attn_weights = attn_weights + attention_mask
