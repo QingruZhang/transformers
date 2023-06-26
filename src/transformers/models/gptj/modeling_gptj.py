@@ -177,11 +177,17 @@ class GPTJAttention(nn.Module):
             else:
                 init_attention_mask = (attention_mask==0).to(dtype)*torch.finfo(dtype).min
                 attn_weights = attn_weights + init_attention_mask 
-                attn_scale = attention_mask.max()
-                scale_attention_mask = (attention_mask>1).to(dtype)*attn_scale + (attention_mask<=1).to(dtype)
-                attn_weights = attn_weights * scale_attention_mask 
+                # attn_scale = attention_mask.max()
+                # scale_attention_mask = (attention_mask>1).to(dtype)*attn_scale + (attention_mask<=1).to(dtype)
+                # attn_weights = attn_weights * scale_attention_mask 
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+        if attention_mask.max()!=0:
+            attn_scale = (attention_mask.max()-1)/(attention_mask!=0).to(dtype).sum(dim=-1, keepdim=True)
+            scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale
+            attn_weights = attn_weights + scale_attn_mask
+            attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+
         attn_weights = attn_weights.to(value.dtype)
         attn_weights = self.attn_dropout(attn_weights)
 
