@@ -80,7 +80,7 @@ def apply_rotary_pos_emb(tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Ten
 
 
 class GPTJAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
 
         max_positions = config.max_position_embeddings
@@ -113,6 +113,12 @@ class GPTJAttention(nn.Module):
         self.rotary_dim = config.rotary_dim
         pos_embd_dim = self.rotary_dim or self.embed_dim
         self.embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
+        self.layer_idx = layer_idx 
+        self.do_attn_update = config.do_attn_update
+        if config.attn_update_layers is not None:
+            self.attn_update_layers = [int(idx) for idx in config.attn_update_layers.split(",")]
+        else:
+            self.attn_update_layers = None if config.do_attn_update is None else [self.layer_idx]
 
     def _split_heads(self, tensor, num_attention_heads, attn_head_size, rotary):
         """
@@ -172,7 +178,7 @@ class GPTJAttention(nn.Module):
             # Apply the attention mask
             dtype = attn_weights.dtype
             device = attention_mask.device 
-            if attention_mask.max()==0:
+            if self.do_attn_update is None:
                 attn_weights = attn_weights + attention_mask
             else:
                 init_attention_mask = (attention_mask==0).to(dtype)*torch.finfo(dtype).min
@@ -182,11 +188,19 @@ class GPTJAttention(nn.Module):
                 # attn_weights = attn_weights * scale_attention_mask 
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        if attention_mask.max()!=0:
-            attn_scale = (attention_mask.max()-1)/(attention_mask!=0).to(dtype).sum(dim=-1, keepdim=True)
-            scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale
-            attn_weights = attn_weights + scale_attn_mask
-            attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+        if attention_mask and self.do_attn_update and self.layer_idx in self.attn_update_layers:
+            if self.do_attn_update=="sum" and attention_mask.max()>1:
+                attn_scale = (attention_mask.max()-1)/(attention_mask!=0).to(dtype).sum(dim=-1, keepdim=True)
+                scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale
+                attn_weights = attn_weights + scale_attn_mask
+                attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+            elif self.do_attn_update=="prod":
+                scale_attn_mask = (attention_mask==0).to(dtype) + attention_mask
+                attn_weights = attn_weights * scale_attn_mask
+                attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True) 
+            else:
+                raise ValueError(f"Unimplement for {str(do_attn_update)} and max {attention_mask.max()}")
+                
 
         attn_weights = attn_weights.to(value.dtype)
         attn_weights = self.attn_dropout(attn_weights) 
@@ -302,11 +316,12 @@ class GPTJMLP(nn.Module):
 
 
 class GPTJBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
         inner_dim = config.n_inner if config.n_inner is not None else 4 * config.n_embd
+        self.layer_idx = layer_idx
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config)
+        self.attn = GPTJAttention(config, layer_idx)
         self.mlp = GPTJMLP(inner_dim, config)
 
     def forward(
@@ -502,8 +517,12 @@ class GPTJModel(GPTJPreTrainedModel):
         self.vocab_size = config.vocab_size
         self.wte = nn.Embedding(config.vocab_size, self.embed_dim)
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([GPTJBlock(config) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList([GPTJBlock(config, idx) for idx in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+
+        # Attention update
+        self.do_attn_update = config.do_attn_update
+        self.attn_update_layers = config.attn_update_layers
 
         # Model parallel
         self.model_parallel = False
@@ -637,7 +656,7 @@ class GPTJModel(GPTJPreTrainedModel):
             # Since we are adding it to the raw scores before the softmax, this is
             # effectively the same as removing these entirely.
             attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
-            if attention_mask.max() == 1:
+            if self.do_attn_update is None:
                 attention_mask = (1.0 - attention_mask) * torch.finfo(self.dtype).min
 
         # Prepare head mask if needed
