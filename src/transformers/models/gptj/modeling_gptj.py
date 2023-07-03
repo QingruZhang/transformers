@@ -188,7 +188,7 @@ class GPTJAttention(nn.Module):
                 # attn_weights = attn_weights * scale_attention_mask 
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        if attention_mask and self.do_attn_update and self.layer_idx in self.attn_update_layers:
+        if attention_mask is not None and self.do_attn_update is not None and self.layer_idx in self.attn_update_layers:
             if self.do_attn_update=="sum" and attention_mask.max()>1:
                 attn_scale = (attention_mask.max()-1)/(attention_mask!=0).to(dtype).sum(dim=-1, keepdim=True)
                 scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale
@@ -199,7 +199,7 @@ class GPTJAttention(nn.Module):
                 attn_weights = attn_weights * scale_attn_mask
                 attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True) 
             else:
-                raise ValueError(f"Unimplement for {str(do_attn_update)} and max {attention_mask.max()}")
+                raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
                 
 
         attn_weights = attn_weights.to(value.dtype)
