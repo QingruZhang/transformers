@@ -57,7 +57,7 @@ def _make_causal_mask(
 
 
 # Copied from transformers.models.bart.modeling_bart._expand_mask
-def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None, do_attn_update:str|None=None):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
     """
@@ -66,9 +66,11 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
 
     expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
 
-    inverted_mask = 1.0 - expanded_mask
-
-    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+    if do_attn_update is not None:
+        return inverted_mask.masked_fill(inverted_mask==0, torch.finfo(dtype).min)
+    else:
+        inverted_mask = 1.0 - expanded_mask
+        return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
 class LlamaRMSNorm(nn.Module):
@@ -159,7 +161,7 @@ class LlamaMLP(nn.Module):
 class LlamaAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -177,6 +179,13 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
+
+        self.layer_idx = layer_idx 
+        self.do_attn_update = config.do_attn_update
+        if config.attn_update_layers is not None:
+            self.attn_update_layers = [int(idx) for idx in config.attn_update_layers.split(",")]
+        else:
+            self.attn_update_layers = None if config.do_attn_update is None else [self.layer_idx]
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -223,13 +232,28 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
-            attn_weights = attn_weights + attention_mask
+            dtype = attn_weights.dtype 
+            if self.do_attn_update is None:
+                attn_weights = attn_weights + attention_mask
+            else:
+                init_attention_mask = (attention_mask<0).to(dtype)*torch.finfo(attn_weights.dtype).min 
+                attn_weights = attn_weights + init_attention_mask 
+
             attn_weights = torch.max(
-                attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+                attn_weights, torch.tensor(torch.finfo(dtype).min, device=attn_weights.device)
             )
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        if attention_mask is not None and self.do_attn_update is not None and self.layer_idx in self.attn_update_layers:
+            dtype = attn_weights.dtype 
+            if self.do_attn_update == "prod":
+                scale_attn_mask = (attention_mask<0).to(dtype) + (attention_mask>=0).to(dtype)*attention_mask
+                attn_weights = attn_weights * scale_attn_mask
+                attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+            else:
+                raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
+
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -248,12 +272,21 @@ class LlamaAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
+    def set_attn_update_layers(self, attn_update_layers):
+        if isinstance(attn_update_layers, str):
+            self.attn_update_layers = [int(idx) for idx in attn_update_layers.split(",")]
+        elif isinstance(attn_update_layers, list):
+            self.attn_update_layers = attn_update_layers
+        else:
+            raise ValueError(f"Unexcepted layers: {attn_update_layers}")
+
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = LlamaAttention(config=config)
+        self.layer_idx = layer_idx
+        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -315,6 +348,9 @@ class LlamaDecoderLayer(nn.Module):
             outputs += (present_key_value,)
 
         return outputs
+
+    def set_attn_update_layers(self, attn_update_layers):
+        self.self_attn.set_attn_update_layers(attn_update_layers)
 
 
 LLAMA_START_DOCSTRING = r"""
@@ -444,8 +480,12 @@ class LlamaModel(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([LlamaDecoderLayer(config, idx) for idx in range(config.num_hidden_layers)])
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # Attention update
+        self.do_attn_update = config.do_attn_update
+        self.attn_update_layers = config.attn_update_layers
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
@@ -457,8 +497,14 @@ class LlamaModel(LlamaPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def set_attn_update_layers(self, attn_update_layers):
+        for layer in self.layers:
+            layer.set_attn_update_layers(attn_update_layers)
+
     # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
+    def _prepare_decoder_attention_mask(
+        self, attention_mask, input_shape, inputs_embeds, past_key_values_length, do_attn_update
+    ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -472,9 +518,10 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
-                inputs_embeds.device
-            )
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1], do_attn_update=do_attn_update
+            ).to(inputs_embeds.device)
+
             combined_attention_mask = (
                 expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
             )
@@ -536,7 +583,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
             )
         attention_mask = self._prepare_decoder_attention_mask(
-            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length,
+            self.do_attn_update 
         )
 
         hidden_states = inputs_embeds
@@ -633,6 +681,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
+
+    def set_attn_update_layers(self, attn_update_layers):
+        self.transformer.set_attn_update_layers(attn_update_layers) 
 
     def set_decoder(self, decoder):
         self.model = decoder
@@ -737,7 +788,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
+            # position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids = (attention_mask!=0).long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
