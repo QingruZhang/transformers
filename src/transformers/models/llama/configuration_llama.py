@@ -99,6 +99,7 @@ class LlamaConfig(PretrainedConfig):
         tie_word_embeddings=False,
         do_attn_update=None,
         attn_update_layers=None,
+        attn_update_heads=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -114,6 +115,7 @@ class LlamaConfig(PretrainedConfig):
 
         self.do_attn_update = do_attn_update
         self.attn_update_layers = attn_update_layers
+        self.attn_update_heads = attn_update_heads
 
         super().__init__(
             pad_token_id=pad_token_id,

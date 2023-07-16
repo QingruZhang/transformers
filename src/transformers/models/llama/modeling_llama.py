@@ -19,6 +19,7 @@
 # limitations under the License.
 """ PyTorch LLaMA model."""
 import math
+import json 
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -186,6 +187,7 @@ class LlamaAttention(nn.Module):
             self.attn_update_layers = [int(idx) for idx in config.attn_update_layers.split(",")]
         else:
             self.attn_update_layers = None if config.do_attn_update is None else [self.layer_idx]
+        self.attn_update_heads = config.attn_update_heads
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -249,10 +251,18 @@ class LlamaAttention(nn.Module):
             dtype = attn_weights.dtype 
             if self.do_attn_update == "prod":
                 scale_attn_mask = (attention_mask<0).to(dtype) + (attention_mask>=0).to(dtype)*attention_mask
-                attn_weights = attn_weights * scale_attn_mask
-                attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
+                all_scale_mask = scale_attn_mask
             else:
                 raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
+
+            if self.attn_update_heads is not None:
+                head_idx = attn_update_heads if isinstance(self.attn_update_heads, list) \
+                                            else self.attn_update_heads[str(self.layer_idx)]
+                all_scale_mask = torch.ones_like(scale_attn_mask).repeat((1, self.num_heads, 1, 1))
+                all_scale_mask[:, head_idx, :, :] = scale_attn_mask 
+
+            attn_weights = attn_weights * all_scale_mask
+            attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
 
         attn_output = torch.matmul(attn_weights, value_states)
 
@@ -486,6 +496,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # Attention update
         self.do_attn_update = config.do_attn_update
         self.attn_update_layers = config.attn_update_layers
+        self.attn_update_heads = config.attn_update_heads 
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
