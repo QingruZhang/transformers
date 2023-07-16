@@ -68,7 +68,7 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     expanded_mask = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(dtype)
 
     if do_attn_update is not None:
-        return inverted_mask.masked_fill(inverted_mask==0, torch.finfo(dtype).min)
+        return expanded_mask.masked_fill(expanded_mask==0, torch.finfo(dtype).min)
     else:
         inverted_mask = 1.0 - expanded_mask
         return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
@@ -235,6 +235,9 @@ class LlamaAttention(nn.Module):
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
             dtype = attn_weights.dtype 
+            attention_mask = torch.max(
+                attention_mask, torch.tensor(torch.finfo(dtype).min, device=attn_weights.device)
+            )
             if self.do_attn_update is None:
                 attn_weights = attn_weights + attention_mask
             else:
@@ -535,6 +538,9 @@ class LlamaModel(LlamaPreTrainedModel):
 
             combined_attention_mask = (
                 expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+            )
+            combined_attention_mask = torch.max(
+                combined_attention_mask, torch.tensor(torch.finfo(inputs_embeds.dtype).min, device=inputs_embeds.device)
             )
 
         return combined_attention_mask
