@@ -259,8 +259,8 @@ class LlamaAttention(nn.Module):
                 raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
 
             if self.attn_update_heads is not None:
-                head_idx = attn_update_heads if isinstance(self.attn_update_heads, list) \
-                                            else self.attn_update_heads[str(self.layer_idx)]
+                head_idx = self.attn_update_heads if isinstance(self.attn_update_heads, list) \
+                                                else self.attn_update_heads[str(self.layer_idx)]
                 all_scale_mask = torch.ones_like(scale_attn_mask).repeat((1, self.num_heads, 1, 1))
                 all_scale_mask[:, head_idx, :, :] = scale_attn_mask 
 
