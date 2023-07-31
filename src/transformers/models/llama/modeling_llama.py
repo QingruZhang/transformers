@@ -185,6 +185,8 @@ class LlamaAttention(nn.Module):
         self.do_attn_update = config.do_attn_update
         if config.attn_update_layers is not None:
             self.attn_update_layers = [int(idx) for idx in config.attn_update_layers.split(",")]
+        elif isinstance(config.attn_update_heads, dict):
+            self.attn_update_layers = [int(idx) for idx in config.attn_update_heads.keys()]
         else:
             self.attn_update_layers = None if config.do_attn_update is None else [self.layer_idx]
         self.attn_update_heads = config.attn_update_heads
@@ -259,6 +261,8 @@ class LlamaAttention(nn.Module):
                 raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
 
             if self.attn_update_heads is not None:
+            # if isinstance(self.attn_update_heads, list) or \
+            #     (isinstance(self.attn_update_heads, dict) and str(self.layer_idx) in self.attn_update_heads):
                 head_idx = self.attn_update_heads if isinstance(self.attn_update_heads, list) \
                                                 else self.attn_update_heads[str(self.layer_idx)]
                 all_scale_mask = torch.ones_like(scale_attn_mask).repeat((1, self.num_heads, 1, 1))
