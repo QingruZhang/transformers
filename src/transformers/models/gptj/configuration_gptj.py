@@ -113,7 +113,8 @@ class GPTJConfig(PretrainedConfig):
         eos_token_id=50256,
         tie_word_embeddings=False,
         do_attn_update=None,
-        attn_update_layers=None, 
+        attn_update_layers=None,
+        attn_update_heads=None, 
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -136,6 +137,7 @@ class GPTJConfig(PretrainedConfig):
 
         self.do_attn_update = do_attn_update
         self.attn_update_layers = attn_update_layers
+        self.attn_update_heads = attn_update_heads
 
         super().__init__(
             bos_token_id=bos_token_id, eos_token_id=eos_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs

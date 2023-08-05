@@ -117,8 +117,11 @@ class GPTJAttention(nn.Module):
         self.do_attn_update = config.do_attn_update
         if config.attn_update_layers is not None:
             self.attn_update_layers = [int(idx) for idx in config.attn_update_layers.split(",")]
+        elif isinstance(config.attn_update_heads, dict):
+            self.attn_update_layers = [int(idx) for idx in config.attn_update_heads.keys()]
         else:
             self.attn_update_layers = None if config.do_attn_update is None else [self.layer_idx]
+        self.attn_update_heads = config.attn_update_heads
 
     def _split_heads(self, tensor, num_attention_heads, attn_head_size, rotary):
         """
@@ -191,12 +194,19 @@ class GPTJAttention(nn.Module):
         if attention_mask is not None and self.do_attn_update is not None and self.layer_idx in self.attn_update_layers:
             if self.do_attn_update=="sum" and attention_mask.max()>1:
                 attn_scale = (attention_mask.max()-1)/(attention_mask!=0).to(dtype).sum(dim=-1, keepdim=True)
-                scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale
+                scale_attn_mask = (attention_mask>1).to(dtype)*attn_scale 
                 attn_weights = attn_weights + scale_attn_mask
                 attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
             elif self.do_attn_update=="prod":
                 scale_attn_mask = (attention_mask==0).to(dtype) + attention_mask
-                attn_weights = attn_weights * scale_attn_mask
+                all_scale_mask = scale_attn_mask 
+                if self.attn_update_heads is not None:
+                    head_idx = self.attn_update_heads if isinstance(self.attn_update_heads, list) \
+                                                    else self.attn_update_heads[str(self.layer_idx)]
+                    all_scale_mask = torch.ones_like(scale_attn_mask).repeat((1, self.num_attention_heads, 1, 1))
+                    all_scale_mask[:, head_idx, :, :] = scale_attn_mask 
+
+                attn_weights = attn_weights * all_scale_mask
                 attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True) 
             else:
                 raise ValueError(f"Unimplement for {str(self.do_attn_update)} and max {attention_mask.max()}")
@@ -534,6 +544,7 @@ class GPTJModel(GPTJPreTrainedModel):
         # Attention update
         self.do_attn_update = config.do_attn_update
         self.attn_update_layers = config.attn_update_layers
+        self.attn_update_heads = config.attn_update_heads 
 
         # Model parallel
         self.model_parallel = False
